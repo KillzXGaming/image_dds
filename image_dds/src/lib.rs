@@ -1,59 +1,6 @@
-//! # image_dds
-//! image_dds enables converting uncompressed image data to and from compressed formats.
-//!
-//! Start converting image data by creating a [Surface] and using one of the provided methods.
-//!
-//! # Usage
-//! The main conversion functions [image_from_dds] and [dds_from_image] convert between [ddsfile] and [image].
-//! For working with floating point images like EXR files, use [imagef32_from_dds] and [dds_from_imagef32].
-//!
-//! These functions are wrappers over conversion methods for [Surface], [SurfaceRgba8], and [SurfaceRgba32Float].
-//! These methods are ideal for internal conversions in libraries
-//! or applications that want to use [Surface] instead of DDS as an intermediate format.
-//!
-//! Surfaces may use owned or borrowed data depending on whether the operation is lossless or not.
-//! A [SurfaceRgba8] can represent a view over an [image::RgbaImage] without any copies, for example.
-//!
-//! For working with custom texture file formats like in video games,
-//! consider defining conversion methods to and from [Surface] to enable chaining operations.
-//! These methods may need to return an error if not all texture formats are supported by [ImageFormat].
-//!
-//! ```rust no_run
-//! # struct CustomTex;
-//! # impl CustomTex {
-//! #     fn to_surface(&self) -> Result<image_dds::Surface<Vec<u8>>, Box<dyn std::error::Error>> {
-//! #         todo!()
-//! #     }
-//! #     fn from_surface<T: AsRef<[u8]>>(
-//! #         surface: image_dds::Surface<T>,
-//! #     ) -> Result<image_dds::Surface<Vec<u8>>, Box<dyn std::error::Error>> {
-//! #         todo!()
-//! #     }
-//! # }
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let custom_tex = CustomTex;
-//! let dds = custom_tex.to_surface()?.to_dds()?;
-//!
-//! let image = image::open("cat.png")?.to_rgba8();
-//! let surface = image_dds::SurfaceRgba8::from_image(&image).encode(
-//!     image_dds::ImageFormat::BC7RgbaUnorm,
-//!     image_dds::Quality::Normal,
-//!     image_dds::Mipmaps::GeneratedAutomatic,
-//! )?;
-//! let new_custom_tex = CustomTex::from_surface(surface)?;
-//! # Ok(()) }
-//! ```
-//!
-//! # Features
-//! Despite the name, neither the `ddsfile` nor `image` crates are required
-//! and can be disabled in the Cargo.toml by setting `default-features = false`.
-//! The `"ddsfile"` and `"image"` features can then be enabled individually.
-//! The `"encode"` feature is enabled by default but can be disabled
-//! to resolve compilation errors on some targets if not needed.
-//!
-//! # Direct Draw Surface (DDS)
-//! DDS can store GPU texture data in a variety of formats.
-//! This includes compressed formats like [ImageFormat::BC7RgbaUnorm] or uncompressed formats like [ImageFormat::Rgba8Unorm].
+//! # Introduction
+//! DDS can store the vast majority of both compressed and uncompressed GPU texture data.
+//! This includes uncompressed formats like [ImageFormat::Rgba8Unorm].
 //! Libraries and applications for working with custom GPU texture file formats often support DDS.
 //! This makes DDS a good interchange format for texture conversion workflows.
 //!
@@ -67,22 +14,40 @@
 //! conversions to and from image and DDS provided by image_dds.
 //!
 //! Although widely supported by modern desktop and console hardware, not all contexts
-//! support compressed texture formats. DDS plugins for image editors may not support newer
-//! compression formats like BC7. Rendering APIs may not support some compressed formats or only make it available
+//! support compressed texture formats. DDS plugins for image editors often don't support newer
+//! compression formats like BC7. Rendering APIs may not support compressed formats or only make it available
 //! via an extension such as in the browser.
-//! image_dds supports decoding surfaces to RGBA `u8` or `f32` for
+//! image_dds supports decoding surfaces to RGBA8 for
 //! better compatibility at the cost of increased memory usage.
 //!
+//! # Usage
+//! The main conversion functions [image_from_dds] and [dds_from_image] convert between [ddsfile] and [image].
+//! For working with floating point images like EXR files, use [imagef32_from_dds] and [dds_from_imagef32].
+//!
+//! These functions are wrappers over conversion methods for [Surface], [SurfaceRgba8], and [SurfaceRgba32Float].
+//! These methods are ideal for internal conversions in libraries
+//! or applications that want to use [Surface] instead of DDS as an intermediate format.
+//!
+//! Surfaces may use owned or borrowed data depending on whether the operation is lossless or not.
+//! A [SurfaceRgba8] can represent a view over an [image::RgbaImage] without any copies, for example.
+//!
+//! # Features
+//! Despite the name, neither the `ddsfile` nor `image` crates are required
+//! and can be disabled in the Cargo.toml by setting `default-features = false`.
+//! The `"ddsfile"` and `"image"` features can then be enabled individually.
+//! The `"encode"` feature is enabled by default but can be disabled
+//! to resolve compilation errors on some targets if not needed.
+//!
 //! # Limitations
+//! BC2 data can be decoded but not encoded due to limitations in intel-tex-rs-2.
+//! This format is very rarely used in practice.
 //! Not all targets will compile by default due to intel-tex-rs-2 using the Intel ISPC compiler
 //! and lacking precompiled kernels for all targets.
-//! Disable the `"encode"` feature if not needed.
 
 mod bcn;
 mod rgba;
 mod surface;
 
-use rgba::convert::Channel;
 pub use surface::{Surface, SurfaceRgba32Float, SurfaceRgba8};
 
 pub mod error;
@@ -115,6 +80,7 @@ pub use dds::*;
     feature = "strum",
     derive(strum::EnumString, strum::Display, strum::EnumIter)
 )]
+#[repr(C)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Quality {
     /// Faster exports with slightly lower quality.
@@ -159,54 +125,45 @@ pub enum Mipmaps {
     feature = "strum",
     derive(strum::EnumString, strum::Display, strum::EnumIter)
 )]
+#[repr(C)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ImageFormat {
     R8Unorm,
-    R8Snorm,
-    Rg8Unorm,
-    Rg8Snorm,
     Rgba8Unorm,
     Rgba8UnormSrgb,
     Rgba16Float,
     Rgba32Float,
-    Bgr8Unorm,
     Bgra8Unorm,
     Bgra8UnormSrgb,
     Bgra4Unorm,
     /// DXT1
     BC1RgbaUnorm,
+    /// DXT1
     BC1RgbaUnormSrgb,
     /// DXT3
     BC2RgbaUnorm,
+    /// DXT3
     BC2RgbaUnormSrgb,
     /// DXT5
     BC3RgbaUnorm,
+    /// DXT5
     BC3RgbaUnormSrgb,
     /// RGTC1
     BC4RUnorm,
+    /// RGTC1
     BC4RSnorm,
     /// RGTC2
     BC5RgUnorm,
+    /// RGTC2
     BC5RgSnorm,
     /// BPTC (float)
     BC6hRgbUfloat,
+    /// BPTC (float)
     BC6hRgbSfloat,
     /// BPTC (unorm)
     BC7RgbaUnorm,
+    /// BPTC (unorm)
     BC7RgbaUnormSrgb,
-    Rgba8Snorm,
-    R16Unorm,
-    R16Snorm,
-    Rg16Unorm,
-    Rg16Snorm,
-    Rgba16Unorm,
-    Rgba16Snorm,
-    R16Float,
-    Rg16Float,
-    R32Float,
-    Rg32Float,
-    Rgb32Float,
-    Bgr5A1Unorm,
 }
 
 impl ImageFormat {
@@ -227,17 +184,20 @@ impl ImageFormat {
             ImageFormat::BC6hRgbSfloat => (4, 4, 1),
             ImageFormat::BC7RgbaUnorm => (4, 4, 1),
             ImageFormat::BC7RgbaUnormSrgb => (4, 4, 1),
-            _ => (1, 1, 1),
+            ImageFormat::R8Unorm => (1, 1, 1),
+            ImageFormat::Rgba8Unorm => (1, 1, 1),
+            ImageFormat::Rgba8UnormSrgb => (1, 1, 1),
+            ImageFormat::Rgba16Float => (1, 1, 1),
+            ImageFormat::Rgba32Float => (1, 1, 1),
+            ImageFormat::Bgra8Unorm => (1, 1, 1),
+            ImageFormat::Bgra8UnormSrgb => (1, 1, 1),
+            ImageFormat::Bgra4Unorm => (1, 1, 1),
         }
     }
 
     fn block_size_in_bytes(&self) -> usize {
-        // Size of a block if compressed or pixel if uncompressed.
         match self {
             ImageFormat::R8Unorm => 1,
-            ImageFormat::R8Snorm => 1,
-            ImageFormat::Rg8Unorm => 2,
-            ImageFormat::Rg8Snorm => 2,
             ImageFormat::Rgba8Unorm => 4,
             ImageFormat::Rgba8UnormSrgb => 4,
             ImageFormat::Rgba16Float => 8,
@@ -259,20 +219,6 @@ impl ImageFormat {
             ImageFormat::BC7RgbaUnorm => 16,
             ImageFormat::BC7RgbaUnormSrgb => 16,
             ImageFormat::Bgra4Unorm => 2,
-            ImageFormat::Bgr8Unorm => 3,
-            ImageFormat::R16Unorm => 2,
-            ImageFormat::R16Snorm => 2,
-            ImageFormat::Rg16Unorm => 4,
-            ImageFormat::Rg16Snorm => 4,
-            ImageFormat::Rgba16Unorm => 8,
-            ImageFormat::Rgba16Snorm => 8,
-            ImageFormat::Rg16Float => 4,
-            ImageFormat::Rg32Float => 8,
-            ImageFormat::R16Float => 2,
-            ImageFormat::R32Float => 4,
-            ImageFormat::Rgba8Snorm => 4,
-            ImageFormat::Rgb32Float => 12,
-            ImageFormat::Bgr5A1Unorm => 2,
         }
     }
 }
@@ -288,7 +234,33 @@ pub fn mip_dimension(base_dimension: u32, mipmap: u32) -> u32 {
     (base_dimension >> mipmap).max(1)
 }
 
-fn downsample_rgba<T: Channel>(
+// TODO: Is this the best way to handle this?
+trait Pixel: Default + Copy {
+    fn from_f32(f: f32) -> Self;
+    fn to_f32(&self) -> f32;
+}
+
+impl Pixel for u8 {
+    fn from_f32(f: f32) -> Self {
+        f as Self
+    }
+
+    fn to_f32(&self) -> f32 {
+        *self as f32
+    }
+}
+
+impl Pixel for f32 {
+    fn from_f32(f: f32) -> Self {
+        f
+    }
+
+    fn to_f32(&self) -> f32 {
+        *self
+    }
+}
+
+fn downsample_rgba<T: Pixel>(
     new_width: usize,
     new_height: usize,
     new_depth: usize,
@@ -299,7 +271,7 @@ fn downsample_rgba<T: Channel>(
 ) -> Vec<T> {
     // Halve the width and height by averaging pixels.
     // This is faster than resizing using the image crate.
-    let mut new_data = vec![T::ZERO; new_width * new_height * new_depth * 4];
+    let mut new_data = vec![T::default(); new_width * new_height * new_depth * 4];
     for z in 0..new_depth {
         for x in 0..new_width {
             for y in 0..new_height {
@@ -337,6 +309,16 @@ fn downsample_rgba<T: Channel>(
     }
 
     new_data
+}
+
+#[inline(always)]
+fn div_round_up(x: usize, d: usize) -> usize {
+    (x + d - 1) / d
+}
+
+#[inline(always)]
+fn round_up(x: usize, n: usize) -> usize {
+    ((x + n - 1) / n) * n
 }
 
 fn calculate_offset(
@@ -404,10 +386,9 @@ fn mip_size(
     block_depth: usize,
     block_size_in_bytes: usize,
 ) -> Option<usize> {
-    width
-        .div_ceil(block_width)
-        .checked_mul(height.div_ceil(block_height))
-        .and_then(|v| v.checked_mul(depth.div_ceil(block_depth)))
+    div_round_up(width, block_width)
+        .checked_mul(div_round_up(height, block_height))
+        .and_then(|v| v.checked_mul(div_round_up(depth, block_depth)))
         .and_then(|v| v.checked_mul(block_size_in_bytes))
 }
 

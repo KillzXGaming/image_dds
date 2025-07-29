@@ -1,11 +1,9 @@
 use thiserror::Error;
 
-#[cfg(feature = "ddsfile")]
-use crate::DdsFormatInfo;
-use crate::ImageFormat;
+use crate::{DdsFormatInfo, ImageFormat};
 
 /// Errors that can occur while creating a decoded image.
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error)]
 pub enum CreateImageError {
     #[error("data length {data_length} is not valid for a {width}x{height} image")]
     InvalidSurfaceDimensions {
@@ -22,7 +20,7 @@ pub enum CreateImageError {
 }
 
 /// Errors that can occur while encoding or decoding a surface.
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error)]
 pub enum SurfaceError {
     #[error("surface dimensions {width} x {height} x {depth} contain no pixels")]
     ZeroSizedSurface { width: u32, height: u32, depth: u32 },
@@ -55,7 +53,6 @@ pub enum SurfaceError {
     #[error("failed to get image data for layer {layer} mipmap {mipmap}")]
     MipmapDataOutOfBounds { layer: u32, mipmap: u32 },
 
-    #[cfg(feature = "ddsfile")]
     #[error("DDS image format {0:?} is not supported")]
     UnsupportedDdsFormat(DdsFormatInfo),
 

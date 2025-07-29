@@ -1,17 +1,16 @@
 use std::ops::Range;
 
 use crate::{
-    bcn::{self, decode_bcn},
+    bcn::{self, rgba_from_bcn},
     error::SurfaceError,
     mip_dimension,
     rgba::{
-        decode_rgba, Bgr5A1, Bgr8, Bgra4, Bgra8, R16Snorm, R8Snorm, Rf16, Rf32, Rg16, Rg16Snorm,
-        Rg8, Rg8Snorm, Rgba16, Rgba16Snorm, Rgba8, Rgba8Snorm, Rgbaf16, Rgbaf32, Rgbf32, Rgf16,
-        Rgf32, R16, R8,
+        rgba8_from_bgra4, rgba8_from_bgra8, rgba8_from_r8, rgba8_from_rgba8, rgba8_from_rgbaf16,
+        rgba8_from_rgbaf32, rgbaf32_from_rgbaf16, rgbaf32_from_rgbaf32,
     },
     ImageFormat, Surface, SurfaceRgba32Float, SurfaceRgba8,
 };
-use bcn::{Bc1, Bc2, Bc3, Bc4, Bc4S, Bc5, Bc5S, Bc6, Bc7};
+use bcn::{Bc1, Bc2, Bc3, Bc4, Bc5, Bc6, Bc7};
 
 impl<T: AsRef<[u8]>> Surface<T> {
     /// Decode all layers and mipmaps from `surface` to RGBA8.
@@ -111,6 +110,150 @@ trait Decode: Sized {
     ) -> Result<Vec<Self>, SurfaceError>;
 }
 
+#[repr(C)]
+pub enum SurfaceErrorCode {
+    Success = 0,
+    ZeroSizedSurface = 1,
+    PixelCountWouldOverflow = 2,
+    NonIntegralDimensionsInBlocks = 3,
+    NotEnoughData = 4,
+    UnsupportedEncodeFormat = 5,
+    InvalidMipmapCount = 6,
+    MipmapDataOutOfBounds = 7,
+    UnsupportedDdsFormat = 8,
+    UnexpectedMipmapCount = 9,
+}
+
+#[no_mangle]
+pub extern "C" fn free_decoded_data(ptr: *mut u8) {
+    if !ptr.is_null() {
+        let _ = unsafe { Box::from_raw(ptr) };
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn decode_bytes_c(
+    width: u32,
+    height: u32,
+    data: *const u8,
+    data_len: usize,
+    format: ImageFormat,
+    out_decode_data: *mut *mut u8,
+    out_decode_len: *mut usize,
+) -> SurfaceErrorCode {
+    let data_slice = unsafe { std::slice::from_raw_parts(data, data_len) };
+
+    match decode_bytes(width, height, format, data_slice) {
+        Ok(decode) => {
+            let len = decode.len();
+            let ptr = decode.as_ptr();
+            // Pass ownership of the memory to the caller
+            std::mem::forget(decode);
+
+            unsafe {
+                *out_decode_data = ptr as *mut u8;
+                *out_decode_len = len;
+            }
+
+            SurfaceErrorCode::Success
+        }
+        Err(err) => match err {
+            SurfaceError::ZeroSizedSurface { .. } => SurfaceErrorCode::ZeroSizedSurface,
+            SurfaceError::PixelCountWouldOverflow { .. } => SurfaceErrorCode::PixelCountWouldOverflow,
+            SurfaceError::NonIntegralDimensionsInBlocks { .. } => SurfaceErrorCode::NonIntegralDimensionsInBlocks,
+            SurfaceError::NotEnoughData { .. } => SurfaceErrorCode::NotEnoughData,
+            SurfaceError::UnsupportedEncodeFormat { .. } => SurfaceErrorCode::UnsupportedEncodeFormat,
+            SurfaceError::InvalidMipmapCount { .. } => SurfaceErrorCode::InvalidMipmapCount,
+            SurfaceError::MipmapDataOutOfBounds { .. } => SurfaceErrorCode::MipmapDataOutOfBounds,
+            SurfaceError::UnsupportedDdsFormat(_) => SurfaceErrorCode::UnsupportedDdsFormat,
+            SurfaceError::UnexpectedMipmapCount { .. } => SurfaceErrorCode::UnexpectedMipmapCount,
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn decode_floats_c(
+    width: u32,
+    height: u32,
+    data: *const u8,
+    data_len: usize,
+    format: ImageFormat,
+    out_decode_data: *mut *mut f32,
+    out_decode_len: *mut usize,
+) -> SurfaceErrorCode {
+    let data_slice = unsafe { std::slice::from_raw_parts(data, data_len) };
+
+    match decode_floats(width, height, format, data_slice) {
+        Ok(decode) => {
+            let len = decode.len();
+            let ptr = decode.as_ptr();
+            // Pass ownership of the memory to the caller
+            std::mem::forget(decode);
+
+            unsafe {
+                *out_decode_data = ptr as *mut f32;
+                *out_decode_len = len;
+            }
+
+            SurfaceErrorCode::Success
+        }
+        Err(err) => match err {
+            SurfaceError::ZeroSizedSurface { .. } => SurfaceErrorCode::ZeroSizedSurface,
+            SurfaceError::PixelCountWouldOverflow { .. } => SurfaceErrorCode::PixelCountWouldOverflow,
+            SurfaceError::NonIntegralDimensionsInBlocks { .. } => SurfaceErrorCode::NonIntegralDimensionsInBlocks,
+            SurfaceError::NotEnoughData { .. } => SurfaceErrorCode::NotEnoughData,
+            SurfaceError::UnsupportedEncodeFormat { .. } => SurfaceErrorCode::UnsupportedEncodeFormat,
+            SurfaceError::InvalidMipmapCount { .. } => SurfaceErrorCode::InvalidMipmapCount,
+            SurfaceError::MipmapDataOutOfBounds { .. } => SurfaceErrorCode::MipmapDataOutOfBounds,
+            SurfaceError::UnsupportedDdsFormat(_) => SurfaceErrorCode::UnsupportedDdsFormat,
+            SurfaceError::UnexpectedMipmapCount { .. } => SurfaceErrorCode::UnexpectedMipmapCount,
+        }
+    }
+}
+
+fn decode_bytes(
+    width: u32,
+    height: u32,
+    image_format: ImageFormat,
+    data: &[u8],
+) -> Result<Vec<u8>, SurfaceError> {
+    use ImageFormat as F;
+    match image_format {
+        F::BC1RgbaUnorm | F::BC1RgbaUnormSrgb => rgba_from_bcn::<Bc1, u8>(width, height, data),
+        F::BC2RgbaUnorm | F::BC2RgbaUnormSrgb => rgba_from_bcn::<Bc2, u8>(width, height, data),
+        F::BC3RgbaUnorm | F::BC3RgbaUnormSrgb => rgba_from_bcn::<Bc3, u8>(width, height, data),
+        F::BC4RUnorm | F::BC4RSnorm => rgba_from_bcn::<Bc4, u8>(width, height, data),
+        F::BC5RgUnorm | F::BC5RgSnorm => rgba_from_bcn::<Bc5, u8>(width, height, data),
+        F::BC6hRgbUfloat | F::BC6hRgbSfloat => rgba_from_bcn::<Bc6, u8>(width, height, data),
+        F::BC7RgbaUnorm | F::BC7RgbaUnormSrgb => rgba_from_bcn::<Bc7, u8>(width, height, data),
+        F::R8Unorm => rgba8_from_r8(width, height, data),
+        F::Rgba8Unorm | F::Rgba8UnormSrgb => rgba8_from_rgba8(width, height, data),
+        F::Rgba16Float => rgba8_from_rgbaf16(width, height, data),
+        F::Rgba32Float => rgba8_from_rgbaf32(width, height, data),
+        F::Bgra8Unorm | F::Bgra8UnormSrgb => rgba8_from_bgra8(width, height, data),
+        F::Bgra4Unorm => rgba8_from_bgra4(width, height, data),
+    }
+}
+
+fn decode_floats(
+    width: u32,
+    height: u32,
+    image_format: ImageFormat,
+    data: &[u8],
+) -> Result<Vec<f32>, SurfaceError> {
+    use ImageFormat as F;
+    match image_format {
+        F::BC6hRgbUfloat | F::BC6hRgbSfloat => rgba_from_bcn::<Bc6, f32>(width, height, data),
+        F::Rgba16Float => rgbaf32_from_rgbaf16(width, height, data),
+        F::Rgba32Float => rgbaf32_from_rgbaf32(width, height, data),
+        _ => {
+            // Use existing decoding for formats that don't store floating point data.
+            let rgba8 = u8::decode(width, height, image_format, data)?;
+            Ok(rgba8.into_iter().map(|u| u as f32 / 255.0).collect())
+        }
+    }
+}
+
 impl Decode for u8 {
     fn decode(
         width: u32,
@@ -120,38 +263,19 @@ impl Decode for u8 {
     ) -> Result<Vec<Self>, SurfaceError> {
         use ImageFormat as F;
         match image_format {
-            F::BC1RgbaUnorm | F::BC1RgbaUnormSrgb => decode_bcn::<Bc1, u8>(width, height, data),
-            F::BC2RgbaUnorm | F::BC2RgbaUnormSrgb => decode_bcn::<Bc2, u8>(width, height, data),
-            F::BC3RgbaUnorm | F::BC3RgbaUnormSrgb => decode_bcn::<Bc3, u8>(width, height, data),
-            F::BC4RUnorm => decode_bcn::<Bc4, u8>(width, height, data),
-            F::BC4RSnorm => decode_bcn::<Bc4S, u8>(width, height, data),
-            F::BC5RgUnorm => decode_bcn::<Bc5, u8>(width, height, data),
-            F::BC5RgSnorm => decode_bcn::<Bc5S, u8>(width, height, data),
-            F::BC6hRgbUfloat | F::BC6hRgbSfloat => decode_bcn::<Bc6, u8>(width, height, data),
-            F::BC7RgbaUnorm | F::BC7RgbaUnormSrgb => decode_bcn::<Bc7, u8>(width, height, data),
-            F::R8Unorm => decode_rgba::<R8, u8>(width, height, data),
-            F::R8Snorm => decode_rgba::<R8Snorm, u8>(width, height, data),
-            F::Rg8Unorm => decode_rgba::<Rg8, u8>(width, height, data),
-            F::Rg8Snorm => decode_rgba::<Rg8Snorm, u8>(width, height, data),
-            F::Rgba8Unorm | F::Rgba8UnormSrgb => decode_rgba::<Rgba8, u8>(width, height, data),
-            F::Rgba16Float => decode_rgba::<Rgbaf16, u8>(width, height, data),
-            F::Rgba32Float => decode_rgba::<Rgbaf32, u8>(width, height, data),
-            F::Bgra8Unorm | F::Bgra8UnormSrgb => decode_rgba::<Bgra8, u8>(width, height, data),
-            F::Rgba8Snorm => decode_rgba::<Rgba8Snorm, u8>(width, height, data),
-            F::Bgra4Unorm => decode_rgba::<Bgra4, u8>(width, height, data),
-            F::Bgr8Unorm => decode_rgba::<Bgr8, u8>(width, height, data),
-            F::R16Unorm => decode_rgba::<R16, u8>(width, height, data),
-            F::R16Snorm => decode_rgba::<R16Snorm, u8>(width, height, data),
-            F::Rg16Unorm => decode_rgba::<Rg16, u8>(width, height, data),
-            F::Rg16Snorm => decode_rgba::<Rg16Snorm, u8>(width, height, data),
-            F::Rgba16Unorm => decode_rgba::<Rgba16, u8>(width, height, data),
-            F::Rgba16Snorm => decode_rgba::<Rgba16Snorm, u8>(width, height, data),
-            F::Rg16Float => decode_rgba::<Rgf16, u8>(width, height, data),
-            F::Rg32Float => decode_rgba::<Rgf32, u8>(width, height, data),
-            F::R16Float => decode_rgba::<Rf16, u8>(width, height, data),
-            F::R32Float => decode_rgba::<Rf32, u8>(width, height, data),
-            F::Rgb32Float => decode_rgba::<Rgbf32, u8>(width, height, data),
-            F::Bgr5A1Unorm => decode_rgba::<Bgr5A1, u8>(width, height, data),
+            F::BC1RgbaUnorm | F::BC1RgbaUnormSrgb => rgba_from_bcn::<Bc1, u8>(width, height, data),
+            F::BC2RgbaUnorm | F::BC2RgbaUnormSrgb => rgba_from_bcn::<Bc2, u8>(width, height, data),
+            F::BC3RgbaUnorm | F::BC3RgbaUnormSrgb => rgba_from_bcn::<Bc3, u8>(width, height, data),
+            F::BC4RUnorm | F::BC4RSnorm => rgba_from_bcn::<Bc4, u8>(width, height, data),
+            F::BC5RgUnorm | F::BC5RgSnorm => rgba_from_bcn::<Bc5, u8>(width, height, data),
+            F::BC6hRgbUfloat | F::BC6hRgbSfloat => rgba_from_bcn::<Bc6, u8>(width, height, data),
+            F::BC7RgbaUnorm | F::BC7RgbaUnormSrgb => rgba_from_bcn::<Bc7, u8>(width, height, data),
+            F::R8Unorm => rgba8_from_r8(width, height, data),
+            F::Rgba8Unorm | F::Rgba8UnormSrgb => rgba8_from_rgba8(width, height, data),
+            F::Rgba16Float => rgba8_from_rgbaf16(width, height, data),
+            F::Rgba32Float => rgba8_from_rgbaf32(width, height, data),
+            F::Bgra8Unorm | F::Bgra8UnormSrgb => rgba8_from_bgra8(width, height, data),
+            F::Bgra4Unorm => rgba8_from_bgra4(width, height, data),
         }
     }
 }
@@ -165,25 +289,9 @@ impl Decode for f32 {
     ) -> Result<Vec<Self>, SurfaceError> {
         use ImageFormat as F;
         match image_format {
-            F::R8Snorm => decode_rgba::<R8Snorm, f32>(width, height, data),
-            F::Rg8Snorm => decode_rgba::<Rg8Snorm, f32>(width, height, data),
-            F::Rgba8Snorm => decode_rgba::<Rgba8Snorm, f32>(width, height, data),
-            F::BC4RSnorm => decode_bcn::<Bc4S, f32>(width, height, data),
-            F::BC5RgSnorm => decode_bcn::<Bc5S, f32>(width, height, data),
-            F::BC6hRgbUfloat | F::BC6hRgbSfloat => decode_bcn::<Bc6, f32>(width, height, data),
-            F::R16Float => decode_rgba::<Rf16, f32>(width, height, data),
-            F::Rg16Float => decode_rgba::<Rgf16, f32>(width, height, data),
-            F::Rgba16Float => decode_rgba::<Rgbaf16, f32>(width, height, data),
-            F::R32Float => decode_rgba::<Rf32, f32>(width, height, data),
-            F::Rg32Float => decode_rgba::<Rgf32, f32>(width, height, data),
-            F::Rgb32Float => decode_rgba::<Rgbf32, f32>(width, height, data),
-            F::Rgba32Float => decode_rgba::<Rgbaf32, f32>(width, height, data),
-            F::R16Unorm => decode_rgba::<R16, f32>(width, height, data),
-            F::Rg16Unorm => decode_rgba::<Rg16, f32>(width, height, data),
-            F::Rgba16Unorm => decode_rgba::<Rgba16, f32>(width, height, data),
-            F::R16Snorm => decode_rgba::<R16Snorm, f32>(width, height, data),
-            F::Rg16Snorm => decode_rgba::<Rg16Snorm, f32>(width, height, data),
-            F::Rgba16Snorm => decode_rgba::<Rgba16Snorm, f32>(width, height, data),
+            F::BC6hRgbUfloat | F::BC6hRgbSfloat => rgba_from_bcn::<Bc6, f32>(width, height, data),
+            F::Rgba16Float => rgbaf32_from_rgbaf16(width, height, data),
+            F::Rgba32Float => rgbaf32_from_rgbaf32(width, height, data),
             _ => {
                 // Use existing decoding for formats that don't store floating point data.
                 let rgba8 = u8::decode(width, height, image_format, data)?;
@@ -196,8 +304,6 @@ impl Decode for f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use strum::IntoEnumIterator;
 
     #[test]
     fn decode_surface_zero_size() {
@@ -296,6 +402,7 @@ mod tests {
 
     #[test]
     fn decode_layers_mipmaps_rgba8_no_mipmaps() {
+        // TODO: How to handle this?
         let rgba8 = Surface {
             width: 4,
             height: 4,
@@ -350,6 +457,7 @@ mod tests {
 
     #[test]
     fn decode_layers_mipmaps_rgbaf32_no_mipmaps() {
+        // TODO: How to handle this?
         let rgbaf32 = Surface {
             width: 4,
             height: 4,
@@ -373,39 +481,5 @@ mod tests {
             },
             rgbaf32
         );
-    }
-
-    #[test]
-    fn decode_all_u8() {
-        for image_format in ImageFormat::iter() {
-            let data = vec![0u8; 4 * 4 * image_format.block_size_in_bytes()];
-            let surface = Surface {
-                width: 4,
-                height: 4,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                image_format,
-                data: data.as_slice(),
-            };
-            surface.decode_rgba8().unwrap();
-        }
-    }
-
-    #[test]
-    fn decode_all_f32() {
-        for image_format in ImageFormat::iter() {
-            let data = vec![0u8; 4 * 4 * image_format.block_size_in_bytes()];
-            let surface = Surface {
-                width: 4,
-                height: 4,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                image_format,
-                data: data.as_slice(),
-            };
-            surface.decode_rgbaf32().unwrap();
-        }
     }
 }

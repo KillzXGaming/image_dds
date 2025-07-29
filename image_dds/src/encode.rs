@@ -1,19 +1,15 @@
 use std::borrow::Cow;
 
-use crate::bcn::{encode_bcn, Bc1, Bc2, Bc3, Bc4, Bc5, Bc6, Bc7};
+use crate::bcn::{bcn_from_rgba, Bc1, Bc2, Bc3, Bc4, Bc5, Bc6, Bc7};
 use crate::rgba::{
-    encode_rgba, Bgr5A1, Bgr8, Bgra4, Bgra8, R16Snorm, R8Snorm, Rf16, Rf32, Rg16, Rg16Snorm, Rg8,
-    Rg8Snorm, Rgba16, Rgba16Snorm, Rgba8, Rgba8Snorm, Rgbaf16, Rgbaf32, Rgbf32, Rgf16, Rgf32, R16,
-    R8,
+    bgra4_from_rgba8, bgra8_from_rgba8, r8_from_rgba8, rgba8_from_rgba8, rgbaf16_from_rgba8,
+    rgbaf16_from_rgbaf32, rgbaf32_from_rgba8, rgbaf32_from_rgbaf32,
 };
 use crate::{
-    downsample_rgba, error::SurfaceError, max_mipmap_count, mip_dimension, ImageFormat, Mipmaps,
-    Quality, Surface, SurfaceRgba8,
+    downsample_rgba, error::SurfaceError, max_mipmap_count, mip_dimension, round_up, ImageFormat,
+    Mipmaps, Quality, Surface, SurfaceRgba8,
 };
-use crate::{
-    rgba::convert::{float_to_snorm8, Channel},
-    SurfaceRgba32Float,
-};
+use crate::{Pixel, SurfaceRgba32Float};
 
 impl<T: AsRef<[u8]>> SurfaceRgba8<T> {
     /// Encode an RGBA8 surface to the given `format`.
@@ -30,6 +26,7 @@ impl<T: AsRef<[u8]>> SurfaceRgba8<T> {
     }
 }
 
+// TODO: Tests for this?
 impl<T: AsRef<[f32]>> SurfaceRgba32Float<T> {
     /// Encode an RGBAF32 surface to the given `format`.
     ///
@@ -53,7 +50,7 @@ fn encode_surface<S, P>(
 ) -> Result<Surface<Vec<u8>>, SurfaceError>
 where
     S: GetMipmap<P>,
-    P: Encode + Channel + Default,
+    P: Default + Copy + Encode + Pixel,
 {
     // TODO: Encode the correct number of array layers.
     let num_mipmaps = match mipmaps {
@@ -94,6 +91,177 @@ where
     })
 }
 
+#[repr(C)]
+pub enum SurfaceErrorCode {
+    Success = 0,
+    ZeroSizedSurface = 1,
+    PixelCountWouldOverflow = 2,
+    NonIntegralDimensionsInBlocks = 3,
+    NotEnoughData = 4,
+    UnsupportedEncodeFormat = 5,
+    InvalidMipmapCount = 6,
+    MipmapDataOutOfBounds = 7,
+    UnsupportedDdsFormat = 8,
+    UnexpectedMipmapCount = 9,
+}
+
+#[no_mangle]
+pub extern "C" fn free_encoded_data(ptr: *mut u8) {
+    if !ptr.is_null() {
+        let _ = unsafe { Box::from_raw(ptr) };
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn encode_bytes_c(
+    width: u32,
+    height: u32,
+    data: *const u8,
+    data_len: usize,
+    format: ImageFormat,
+    quality: Quality,
+    out_encoded_data: *mut *mut u8,
+    out_encoded_len: *mut usize,
+) -> SurfaceErrorCode {
+    let data_slice = unsafe { std::slice::from_raw_parts(data, data_len) };
+
+    match encode_bytes(width, height, data_slice, format, quality) {
+        Ok(encoded) => {
+            let len = encoded.len();
+            let ptr = encoded.as_ptr();
+            // Pass ownership of the memory to the caller
+            std::mem::forget(encoded);
+
+            unsafe {
+                *out_encoded_data = ptr as *mut u8;
+                *out_encoded_len = len;
+            }
+
+            SurfaceErrorCode::Success
+        }
+        Err(err) => match err {
+            SurfaceError::ZeroSizedSurface { .. } => SurfaceErrorCode::ZeroSizedSurface,
+            SurfaceError::PixelCountWouldOverflow { .. } => SurfaceErrorCode::PixelCountWouldOverflow,
+            SurfaceError::NonIntegralDimensionsInBlocks { .. } => SurfaceErrorCode::NonIntegralDimensionsInBlocks,
+            SurfaceError::NotEnoughData { .. } => SurfaceErrorCode::NotEnoughData,
+            SurfaceError::UnsupportedEncodeFormat { .. } => SurfaceErrorCode::UnsupportedEncodeFormat,
+            SurfaceError::InvalidMipmapCount { .. } => SurfaceErrorCode::InvalidMipmapCount,
+            SurfaceError::MipmapDataOutOfBounds { .. } => SurfaceErrorCode::MipmapDataOutOfBounds,
+            SurfaceError::UnsupportedDdsFormat(_) => SurfaceErrorCode::UnsupportedDdsFormat,
+            SurfaceError::UnexpectedMipmapCount { .. } => SurfaceErrorCode::UnexpectedMipmapCount,
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn encode_floats_c(
+    width: u32,
+    height: u32,
+    data: *const f32,
+    data_len: usize,
+    format: ImageFormat,
+    quality: Quality,
+    out_encoded_data: *mut *mut u8,
+    out_encoded_len: *mut usize,
+) -> SurfaceErrorCode {
+    let data_slice = unsafe { std::slice::from_raw_parts(data, data_len) };
+
+    match encode_floats(width, height, data_slice, format, quality) {
+        Ok(encoded) => {
+            let len = encoded.len();
+            let ptr = encoded.as_ptr();
+            // Pass ownership of the memory to the caller
+            std::mem::forget(encoded);
+
+            unsafe {
+                *out_encoded_data = ptr as *mut u8;
+                *out_encoded_len = len;
+            }
+
+            SurfaceErrorCode::Success
+        }
+        Err(err) => match err {
+            SurfaceError::ZeroSizedSurface { .. } => SurfaceErrorCode::ZeroSizedSurface,
+            SurfaceError::PixelCountWouldOverflow { .. } => SurfaceErrorCode::PixelCountWouldOverflow,
+            SurfaceError::NonIntegralDimensionsInBlocks { .. } => SurfaceErrorCode::NonIntegralDimensionsInBlocks,
+            SurfaceError::NotEnoughData { .. } => SurfaceErrorCode::NotEnoughData,
+            SurfaceError::UnsupportedEncodeFormat { .. } => SurfaceErrorCode::UnsupportedEncodeFormat,
+            SurfaceError::InvalidMipmapCount { .. } => SurfaceErrorCode::InvalidMipmapCount,
+            SurfaceError::MipmapDataOutOfBounds { .. } => SurfaceErrorCode::MipmapDataOutOfBounds,
+            SurfaceError::UnsupportedDdsFormat(_) => SurfaceErrorCode::UnsupportedDdsFormat,
+            SurfaceError::UnexpectedMipmapCount { .. } => SurfaceErrorCode::UnexpectedMipmapCount,
+        }
+    }
+}
+
+fn encode_bytes(
+        width: u32,
+        height: u32,
+        data: &[u8],
+        format: ImageFormat,
+        quality: Quality,
+    ) -> Result<Vec<u8>, SurfaceError> {
+        // Unorm and srgb only affect how the data is read.
+        // Use the same conversion code for both.
+        use ImageFormat as F;
+        match format {
+            F::BC1RgbaUnorm | F::BC1RgbaUnormSrgb => {
+                bcn_from_rgba::<Bc1, u8>(width, height, data, quality)
+            }
+            F::BC2RgbaUnorm | F::BC2RgbaUnormSrgb => {
+                bcn_from_rgba::<Bc2, u8>(width, height, data, quality)
+            }
+            F::BC3RgbaUnorm | F::BC3RgbaUnormSrgb => {
+                bcn_from_rgba::<Bc3, u8>(width, height, data, quality)
+            }
+            F::BC4RUnorm | F::BC4RSnorm => bcn_from_rgba::<Bc4, u8>(width, height, data, quality),
+            F::BC5RgUnorm | F::BC5RgSnorm => bcn_from_rgba::<Bc5, u8>(width, height, data, quality),
+            F::BC6hRgbUfloat | F::BC6hRgbSfloat => {
+                bcn_from_rgba::<Bc6, u8>(width, height, data, quality)
+            }
+            F::BC7RgbaUnorm | F::BC7RgbaUnormSrgb => {
+                bcn_from_rgba::<Bc7, u8>(width, height, data, quality)
+            }
+            F::R8Unorm => r8_from_rgba8(width, height, data),
+            F::Rgba8Unorm => rgba8_from_rgba8(width, height, data),
+            F::Rgba8UnormSrgb => rgba8_from_rgba8(width, height, data),
+            F::Rgba16Float => rgbaf16_from_rgba8(width, height, data),
+            F::Rgba32Float => rgbaf32_from_rgba8(width, height, data),
+            F::Bgra8Unorm => bgra8_from_rgba8(width, height, data),
+            F::Bgra8UnormSrgb => bgra8_from_rgba8(width, height, data),
+            F::Bgra4Unorm => bgra4_from_rgba8(width, height, data),
+        }
+    }
+
+fn encode_floats(
+    width: u32,
+    height: u32,
+    data: &[f32],
+    format: ImageFormat,
+    quality: Quality,
+) -> Result<Vec<u8>, SurfaceError> {
+    // Unorm and srgb only affect how the data is read.
+    // Use the same conversion code for both.
+    use ImageFormat as F;
+    match format {
+        F::BC6hRgbUfloat | F::BC6hRgbSfloat => {
+            bcn_from_rgba::<Bc6, f32>(width, height, data, quality)
+        }
+        F::Rgba16Float => {
+            // TODO: Create conversion functions that don't require a cast?
+            rgbaf16_from_rgbaf32(width, height, bytemuck::cast_slice(data))
+                .map(|d| bytemuck::cast_slice(&d).to_vec())
+        }
+        // TODO: Create conversion functions that don't require a cast?
+        F::Rgba32Float => rgbaf32_from_rgbaf32(width, height, bytemuck::cast_slice(data))
+            .map(|d| bytemuck::cast_slice(&d).to_vec()),
+        _ => {
+            let rgba8: Vec<_> = data.iter().map(|f| (f * 255.0) as u8).collect();
+            u8::encode(width, height, &rgba8, format, quality)
+        }
+    }
+}
+
 // TODO: Find a way to simplify this.
 fn encode_mipmaps_rgba<S, P>(
     surface_data: &mut Vec<u8>,
@@ -106,33 +274,29 @@ fn encode_mipmaps_rgba<S, P>(
 ) -> Result<(), SurfaceError>
 where
     S: GetMipmap<P>,
-    P: Default + Encode + Channel,
+    P: Default + Copy + Encode + Pixel,
 {
     let block_dimensions = format.block_dimensions();
 
-    // Track the previous image data and dimensions.
-    // This enables generating mipmaps from a single base layer.
-    let mut mip_data = get_mipmap_data(surface, layer, 0, block_dimensions)?;
-
-    let encoded = mip_data.encode(format, quality)?;
-    surface_data.extend_from_slice(&encoded);
-
-    for mipmap in 1..num_mipmaps {
-        mip_data = if use_surface {
-            // TODO: Error if surface does not have the appropriate number of mipmaps?
-            get_mipmap_data(surface, layer, mipmap, block_dimensions)?
-        } else {
-            mip_data.downsample(
-                surface.width(),
-                surface.height(),
-                surface.depth(),
-                block_dimensions,
-                mipmap,
-            )
-        };
+    for level in 0..surface.depth() {
+        // Track the previous image data and dimensions.
+        // This enables generating mipmaps from a single base layer.
+        let mut mip_data = get_mipmap_data(surface, layer, level, 0, block_dimensions)?;
 
         let encoded = mip_data.encode(format, quality)?;
         surface_data.extend_from_slice(&encoded);
+
+        for mipmap in 1..num_mipmaps {
+            mip_data = if use_surface {
+                // TODO: Error if surface does not have the appropriate number of mipmaps?
+                get_mipmap_data(surface, layer, level, mipmap, block_dimensions)?
+            } else {
+                mip_data.downsample(surface.width(), surface.height(), block_dimensions, mipmap)
+            };
+
+            let encoded = mip_data.encode(format, quality)?;
+            surface_data.extend_from_slice(&encoded);
+        }
     }
 
     Ok(())
@@ -141,16 +305,14 @@ where
 struct MipData<T> {
     width: usize,
     height: usize,
-    depth: usize,
     data: Vec<T>,
 }
 
-impl<T: Channel> MipData<T> {
+impl<T: Pixel> MipData<T> {
     fn downsample(
         &self,
         base_width: u32,
         base_height: u32,
-        base_depth: u32,
         block_dimensions: (u32, u32, u32),
         mipmap: u32,
     ) -> MipData<T> {
@@ -159,25 +321,16 @@ impl<T: Channel> MipData<T> {
         let (width, height, depth) = physical_dimensions(
             mip_dimension(base_width, mipmap),
             mip_dimension(base_height, mipmap),
-            mip_dimension(base_depth, mipmap),
+            1,
             block_dimensions,
         );
 
         // Assume the data is already padded.
-        let data = downsample_rgba(
-            width,
-            height,
-            depth,
-            self.width,
-            self.height,
-            self.depth,
-            &self.data,
-        );
+        let data = downsample_rgba(width, height, depth, self.width, self.height, 1, &self.data);
 
         MipData {
             width,
             height,
-            depth,
             data,
         }
     }
@@ -190,7 +343,7 @@ where
     fn encode(&self, format: ImageFormat, quality: Quality) -> Result<Vec<u8>, SurfaceError> {
         T::encode(
             self.width as u32,
-            self.height as u32 * self.depth as u32,
+            self.height as u32,
             &self.data,
             format,
             quality,
@@ -268,6 +421,7 @@ where
 fn get_mipmap_data<S, P>(
     surface: &S,
     layer: u32,
+    depth_level: u32,
     mipmap: u32,
     block_dimensions: (u32, u32, u32),
 ) -> Result<MipData<P>, SurfaceError>
@@ -277,34 +431,25 @@ where
 {
     let mip_width = mip_dimension(surface.width(), mipmap);
     let mip_height = mip_dimension(surface.height(), mipmap);
-    let mip_depth = mip_dimension(surface.depth(), mipmap);
 
-    // TODO: This should be for all depth levels.
-    // TODO: This can be optimized to avoid copies?
-    let mut data = Vec::new();
-    for level in 0..surface.depth() {
-        let new_data = surface.get(layer, level, mipmap).unwrap();
-        data.extend_from_slice(new_data);
-    }
+    let data = surface.get(layer, depth_level, mipmap).unwrap();
 
-    let (width, height, depth) =
-        physical_dimensions(mip_width, mip_height, mip_depth, block_dimensions);
+    let (width, height, _) = physical_dimensions(mip_width, mip_height, 1, block_dimensions);
 
     let data = pad_mipmap_rgba(
         mip_width as usize,
         mip_height as usize,
-        mip_depth as usize,
+        1,
         width,
         height,
-        depth,
-        &data,
+        1,
+        data,
     )
     .to_vec();
 
     Ok(MipData {
         width,
         height,
-        depth,
         data,
     })
 }
@@ -321,9 +466,9 @@ fn physical_dimensions(
     // https://learn.microsoft.com/en-us/windows/win32/direct3d10/d3d10-graphics-programming-guide-resources-block-compression
     let (block_width, block_height, block_depth) = block_dimensions;
     (
-        width.next_multiple_of(block_width) as usize,
-        height.next_multiple_of(block_height) as usize,
-        depth.next_multiple_of(block_depth) as usize,
+        round_up(width as usize, block_width as usize),
+        round_up(height as usize, block_height as usize),
+        round_up(depth as usize, block_depth as usize),
     )
 }
 
@@ -386,45 +531,30 @@ impl Encode for u8 {
         use ImageFormat as F;
         match format {
             F::BC1RgbaUnorm | F::BC1RgbaUnormSrgb => {
-                encode_bcn::<Bc1, u8>(width, height, data, quality)
+                bcn_from_rgba::<Bc1, u8>(width, height, data, quality)
             }
             F::BC2RgbaUnorm | F::BC2RgbaUnormSrgb => {
-                encode_bcn::<Bc2, u8>(width, height, data, quality)
+                bcn_from_rgba::<Bc2, u8>(width, height, data, quality)
             }
             F::BC3RgbaUnorm | F::BC3RgbaUnormSrgb => {
-                encode_bcn::<Bc3, u8>(width, height, data, quality)
+                bcn_from_rgba::<Bc3, u8>(width, height, data, quality)
             }
-            F::BC4RUnorm | F::BC4RSnorm => encode_bcn::<Bc4, u8>(width, height, data, quality),
-            F::BC5RgUnorm | F::BC5RgSnorm => encode_bcn::<Bc5, u8>(width, height, data, quality),
+            F::BC4RUnorm | F::BC4RSnorm => bcn_from_rgba::<Bc4, u8>(width, height, data, quality),
+            F::BC5RgUnorm | F::BC5RgSnorm => bcn_from_rgba::<Bc5, u8>(width, height, data, quality),
             F::BC6hRgbUfloat | F::BC6hRgbSfloat => {
-                encode_bcn::<Bc6, u8>(width, height, data, quality)
+                bcn_from_rgba::<Bc6, u8>(width, height, data, quality)
             }
             F::BC7RgbaUnorm | F::BC7RgbaUnormSrgb => {
-                encode_bcn::<Bc7, u8>(width, height, data, quality)
+                bcn_from_rgba::<Bc7, u8>(width, height, data, quality)
             }
-            F::R8Unorm => encode_rgba::<R8, u8>(width, height, data),
-            F::R8Snorm => encode_rgba::<R8Snorm, u8>(width, height, data),
-            F::Rg8Unorm => encode_rgba::<Rg8, u8>(width, height, data),
-            F::Rg8Snorm => encode_rgba::<Rg8Snorm, u8>(width, height, data),
-            F::Rgba8Unorm | F::Rgba8UnormSrgb => encode_rgba::<Rgba8, u8>(width, height, data),
-            F::Rgba8Snorm => encode_rgba::<Rgba8Snorm, u8>(width, height, data),
-            F::Bgra8Unorm | F::Bgra8UnormSrgb => encode_rgba::<Bgra8, u8>(width, height, data),
-            F::Bgra4Unorm => encode_rgba::<Bgra4, u8>(width, height, data),
-            F::Bgr8Unorm => encode_rgba::<Bgr8, u8>(width, height, data),
-            F::R16Unorm => encode_rgba::<R16, u8>(width, height, data),
-            F::R16Snorm => encode_rgba::<R16Snorm, u8>(width, height, data),
-            F::Rg16Unorm => encode_rgba::<Rg16, u8>(width, height, data),
-            F::Rg16Snorm => encode_rgba::<Rg16Snorm, u8>(width, height, data),
-            F::Rgba16Unorm => encode_rgba::<Rgba16, u8>(width, height, data),
-            F::Rgba16Snorm => encode_rgba::<Rgba16Snorm, u8>(width, height, data),
-            F::R16Float => encode_rgba::<Rf32, u8>(width, height, data),
-            F::Rg16Float => encode_rgba::<Rgf16, u8>(width, height, data),
-            F::Rgba16Float => encode_rgba::<Rgbaf16, u8>(width, height, data),
-            F::R32Float => encode_rgba::<Rf32, u8>(width, height, data),
-            F::Rg32Float => encode_rgba::<Rgf32, u8>(width, height, data),
-            F::Rgb32Float => encode_rgba::<Rgbf32, u8>(width, height, data),
-            F::Rgba32Float => encode_rgba::<Rgbaf32, u8>(width, height, data),
-            F::Bgr5A1Unorm => encode_rgba::<Bgr5A1, u8>(width, height, data),
+            F::R8Unorm => r8_from_rgba8(width, height, data),
+            F::Rgba8Unorm => rgba8_from_rgba8(width, height, data),
+            F::Rgba8UnormSrgb => rgba8_from_rgba8(width, height, data),
+            F::Rgba16Float => rgbaf16_from_rgba8(width, height, data),
+            F::Rgba32Float => rgbaf32_from_rgba8(width, height, data),
+            F::Bgra8Unorm => bgra8_from_rgba8(width, height, data),
+            F::Bgra8UnormSrgb => bgra8_from_rgba8(width, height, data),
+            F::Bgra4Unorm => bgra4_from_rgba8(width, height, data),
         }
     }
 }
@@ -441,29 +571,17 @@ impl Encode for f32 {
         // Use the same conversion code for both.
         use ImageFormat as F;
         match format {
-            F::R8Snorm => encode_rgba::<R8Snorm, f32>(width, height, data),
-            F::Rg8Snorm => encode_rgba::<Rg8Snorm, f32>(width, height, data),
-            F::Rgba8Snorm => encode_rgba::<Rgba8Snorm, f32>(width, height, data),
-            F::BC4RSnorm | F::BC5RgSnorm => {
-                // intel_tex doesn't have a dedicated encoder for snorm formats.
-                let rgba8: Vec<_> = data.iter().map(|f| float_to_snorm8(*f) as u8).collect();
-                u8::encode(width, height, &rgba8, format, quality)
-            }
             F::BC6hRgbUfloat | F::BC6hRgbSfloat => {
-                encode_bcn::<Bc6, f32>(width, height, data, quality)
+                bcn_from_rgba::<Bc6, f32>(width, height, data, quality)
             }
-            F::R16Float => encode_rgba::<Rf16, f32>(width, height, data),
-            F::Rg16Float => encode_rgba::<Rgf16, f32>(width, height, data),
-            F::Rgba16Float => encode_rgba::<Rgbaf16, f32>(width, height, data),
-            F::R32Float => encode_rgba::<Rf32, f32>(width, height, data),
-            F::Rg32Float => encode_rgba::<Rgf32, f32>(width, height, data),
-            F::Rgba32Float => encode_rgba::<Rgbaf32, f32>(width, height, data),
-            F::R16Unorm => encode_rgba::<R16, f32>(width, height, data),
-            F::Rg16Unorm => encode_rgba::<Rg16, f32>(width, height, data),
-            F::Rgba16Unorm => encode_rgba::<Rgba16, f32>(width, height, data),
-            F::R16Snorm => encode_rgba::<R16Snorm, f32>(width, height, data),
-            F::Rg16Snorm => encode_rgba::<Rg16Snorm, f32>(width, height, data),
-            F::Rgba16Snorm => encode_rgba::<Rgba16Snorm, f32>(width, height, data),
+            F::Rgba16Float => {
+                // TODO: Create conversion functions that don't require a cast?
+                rgbaf16_from_rgbaf32(width, height, bytemuck::cast_slice(data))
+                    .map(|d| bytemuck::cast_slice(&d).to_vec())
+            }
+            // TODO: Create conversion functions that don't require a cast?
+            F::Rgba32Float => rgbaf32_from_rgbaf32(width, height, bytemuck::cast_slice(data))
+                .map(|d| bytemuck::cast_slice(&d).to_vec()),
             _ => {
                 let rgba8: Vec<_> = data.iter().map(|f| (f * 255.0) as u8).collect();
                 u8::encode(width, height, &rgba8, format, quality)
@@ -475,8 +593,6 @@ impl Encode for f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use strum::IntoEnumIterator;
 
     #[test]
     fn encode_surface_integral_dimensions() {
@@ -668,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_surface_float32_cube_mipmaps_length() {
+    fn encode_surface_float32_cube_mipmaps() {
         // It's ok for mipmaps to not be divisible by the block width.
         let surface = SurfaceRgba32Float {
             width: 4,
@@ -801,205 +917,6 @@ mod tests {
     }
 
     #[test]
-    fn encode_surface_float32_2d_mipmaps() {
-        let surface = SurfaceRgba32Float {
-            width: 3,
-            height: 3,
-            depth: 1,
-            layers: 1,
-            mipmaps: 1,
-            data: &(0..36).map(|i| i as f32).collect::<Vec<_>>(),
-        }
-        .encode(
-            ImageFormat::Rgba32Float,
-            Quality::Fast,
-            Mipmaps::GeneratedAutomatic,
-        )
-        .unwrap();
-
-        assert_eq!(
-            Surface {
-                width: 3,
-                height: 3,
-                depth: 1,
-                layers: 1,
-                mipmaps: 2,
-                image_format: ImageFormat::Rgba32Float,
-                data: bytemuck::cast_slice::<[f32; 4], u8>(&[
-                    [0.0, 1.0, 2.0, 3.0],
-                    [4.0, 5.0, 6.0, 7.0],
-                    [8.0, 9.0, 10.0, 11.0],
-                    [12.0, 13.0, 14.0, 15.0],
-                    [16.0, 17.0, 18.0, 19.0],
-                    [20.0, 21.0, 22.0, 23.0],
-                    [24.0, 25.0, 26.0, 27.0],
-                    [28.0, 29.0, 30.0, 31.0],
-                    [32.0, 33.0, 34.0, 35.0],
-                    [8.0, 9.0, 10.0, 11.0],
-                ])
-                .to_vec()
-            },
-            surface
-        );
-    }
-
-    #[test]
-    fn encode_surface_float32_3d_mipmaps() {
-        let surface = SurfaceRgba32Float {
-            width: 3,
-            height: 3,
-            depth: 3,
-            layers: 1,
-            mipmaps: 1,
-            data: &(0..108).map(|i| i as f32).collect::<Vec<_>>(),
-        }
-        .encode(
-            ImageFormat::Rgba32Float,
-            Quality::Fast,
-            Mipmaps::GeneratedAutomatic,
-        )
-        .unwrap();
-
-        dbg!(bytemuck::cast_slice::<_, [f32; 4]>(&surface.data));
-
-        assert_eq!(
-            Surface {
-                width: 3,
-                height: 3,
-                depth: 3,
-                layers: 1,
-                mipmaps: 2,
-                image_format: ImageFormat::Rgba32Float,
-                data: bytemuck::cast_slice::<[f32; 4], u8>(&[
-                    [0.0, 1.0, 2.0, 3.0],
-                    [4.0, 5.0, 6.0, 7.0],
-                    [8.0, 9.0, 10.0, 11.0],
-                    [12.0, 13.0, 14.0, 15.0],
-                    [16.0, 17.0, 18.0, 19.0],
-                    [20.0, 21.0, 22.0, 23.0],
-                    [24.0, 25.0, 26.0, 27.0],
-                    [28.0, 29.0, 30.0, 31.0],
-                    [32.0, 33.0, 34.0, 35.0],
-                    [36.0, 37.0, 38.0, 39.0],
-                    [40.0, 41.0, 42.0, 43.0],
-                    [44.0, 45.0, 46.0, 47.0],
-                    [48.0, 49.0, 50.0, 51.0],
-                    [52.0, 53.0, 54.0, 55.0],
-                    [56.0, 57.0, 58.0, 59.0],
-                    [60.0, 61.0, 62.0, 63.0],
-                    [64.0, 65.0, 66.0, 67.0],
-                    [68.0, 69.0, 70.0, 71.0],
-                    [72.0, 73.0, 74.0, 75.0],
-                    [76.0, 77.0, 78.0, 79.0],
-                    [80.0, 81.0, 82.0, 83.0],
-                    [84.0, 85.0, 86.0, 87.0],
-                    [88.0, 89.0, 90.0, 91.0],
-                    [92.0, 93.0, 94.0, 95.0],
-                    [96.0, 97.0, 98.0, 99.0],
-                    [100.0, 101.0, 102.0, 103.0],
-                    [104.0, 105.0, 106.0, 107.0],
-                    [26.0, 27.0, 28.0, 29.0],
-                ])
-                .to_vec()
-            },
-            surface
-        );
-    }
-
-    #[test]
-    fn encode_surface_float32_cube_mipmaps() {
-        let surface = SurfaceRgba32Float {
-            width: 3,
-            height: 3,
-            depth: 1,
-            layers: 6,
-            mipmaps: 1,
-            data: &(0..216).map(|i| i as f32).collect::<Vec<_>>(),
-        }
-        .encode(
-            ImageFormat::Rgba32Float,
-            Quality::Fast,
-            Mipmaps::GeneratedAutomatic,
-        )
-        .unwrap();
-
-        assert_eq!(
-            Surface {
-                width: 3,
-                height: 3,
-                depth: 1,
-                layers: 6,
-                mipmaps: 2,
-                image_format: ImageFormat::Rgba32Float,
-                data: bytemuck::cast_slice::<[f32; 4], u8>(&[
-                    [0.0, 1.0, 2.0, 3.0],
-                    [4.0, 5.0, 6.0, 7.0],
-                    [8.0, 9.0, 10.0, 11.0],
-                    [12.0, 13.0, 14.0, 15.0],
-                    [16.0, 17.0, 18.0, 19.0],
-                    [20.0, 21.0, 22.0, 23.0],
-                    [24.0, 25.0, 26.0, 27.0],
-                    [28.0, 29.0, 30.0, 31.0],
-                    [32.0, 33.0, 34.0, 35.0],
-                    [8.0, 9.0, 10.0, 11.0],
-                    [36.0, 37.0, 38.0, 39.0],
-                    [40.0, 41.0, 42.0, 43.0],
-                    [44.0, 45.0, 46.0, 47.0],
-                    [48.0, 49.0, 50.0, 51.0],
-                    [52.0, 53.0, 54.0, 55.0],
-                    [56.0, 57.0, 58.0, 59.0],
-                    [60.0, 61.0, 62.0, 63.0],
-                    [64.0, 65.0, 66.0, 67.0],
-                    [68.0, 69.0, 70.0, 71.0],
-                    [44.0, 45.0, 46.0, 47.0],
-                    [72.0, 73.0, 74.0, 75.0],
-                    [76.0, 77.0, 78.0, 79.0],
-                    [80.0, 81.0, 82.0, 83.0],
-                    [84.0, 85.0, 86.0, 87.0],
-                    [88.0, 89.0, 90.0, 91.0],
-                    [92.0, 93.0, 94.0, 95.0],
-                    [96.0, 97.0, 98.0, 99.0],
-                    [100.0, 101.0, 102.0, 103.0],
-                    [104.0, 105.0, 106.0, 107.0],
-                    [80.0, 81.0, 82.0, 83.0],
-                    [108.0, 109.0, 110.0, 111.0],
-                    [112.0, 113.0, 114.0, 115.0],
-                    [116.0, 117.0, 118.0, 119.0],
-                    [120.0, 121.0, 122.0, 123.0],
-                    [124.0, 125.0, 126.0, 127.0],
-                    [128.0, 129.0, 130.0, 131.0],
-                    [132.0, 133.0, 134.0, 135.0],
-                    [136.0, 137.0, 138.0, 139.0],
-                    [140.0, 141.0, 142.0, 143.0],
-                    [116.0, 117.0, 118.0, 119.0],
-                    [144.0, 145.0, 146.0, 147.0],
-                    [148.0, 149.0, 150.0, 151.0],
-                    [152.0, 153.0, 154.0, 155.0],
-                    [156.0, 157.0, 158.0, 159.0],
-                    [160.0, 161.0, 162.0, 163.0],
-                    [164.0, 165.0, 166.0, 167.0],
-                    [168.0, 169.0, 170.0, 171.0],
-                    [172.0, 173.0, 174.0, 175.0],
-                    [176.0, 177.0, 178.0, 179.0],
-                    [152.0, 153.0, 154.0, 155.0],
-                    [180.0, 181.0, 182.0, 183.0],
-                    [184.0, 185.0, 186.0, 187.0],
-                    [188.0, 189.0, 190.0, 191.0],
-                    [192.0, 193.0, 194.0, 195.0],
-                    [196.0, 197.0, 198.0, 199.0],
-                    [200.0, 201.0, 202.0, 203.0],
-                    [204.0, 205.0, 206.0, 207.0],
-                    [208.0, 209.0, 210.0, 211.0],
-                    [212.0, 213.0, 214.0, 215.0],
-                    [188.0, 189.0, 190.0, 191.0],
-                ])
-                .to_vec()
-            },
-            surface
-        );
-    }
-
-    #[test]
     fn pad_1x1_to_1x1() {
         assert_eq!(
             Cow::<[u8]>::Borrowed(&[1, 2, 3, 4]),
@@ -1045,39 +962,5 @@ mod tests {
         assert_eq!((4, 4, 1), physical_dimensions(4, 4, 1, (4, 4, 1)));
         assert_eq!((4, 4, 1), physical_dimensions(2, 2, 1, (4, 4, 1)));
         assert_eq!((4, 4, 1), physical_dimensions(1, 1, 1, (4, 4, 1)));
-    }
-
-    #[test]
-    fn encode_all_u8() {
-        for image_format in ImageFormat::iter() {
-            let surface = SurfaceRgba8 {
-                width: 4,
-                height: 4,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                data: vec![0u8; 4 * 4 * 4],
-            };
-            surface
-                .encode(image_format, Quality::Normal, Mipmaps::GeneratedAutomatic)
-                .unwrap();
-        }
-    }
-
-    #[test]
-    fn encode_all_f32() {
-        for image_format in ImageFormat::iter() {
-            let surface = SurfaceRgba32Float {
-                width: 4,
-                height: 4,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                data: vec![0.0; 4 * 4 * 4],
-            };
-            surface
-                .encode(image_format, Quality::Normal, Mipmaps::GeneratedAutomatic)
-                .unwrap();
-        }
     }
 }

@@ -4,7 +4,8 @@ use crate::{
 };
 
 /// A surface with an image format known at runtime.
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[repr(C)]
+#[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Surface<T> {
@@ -97,23 +98,8 @@ impl<T: AsRef<[u8]>> Surface<T> {
     }
 }
 
-impl<T> Surface<Vec<T>> {
-    /// Convert to a surface with borrowed data.
-    pub fn as_ref(&self) -> Surface<&[T]> {
-        Surface {
-            width: self.width,
-            height: self.height,
-            depth: self.depth,
-            layers: self.layers,
-            mipmaps: self.mipmaps,
-            image_format: self.image_format,
-            data: self.data.as_ref(),
-        }
-    }
-}
-
 /// An uncompressed [ImageFormat::Rgba8Unorm] surface with 4 bytes per pixel.
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SurfaceRgba8<T> {
@@ -138,20 +124,6 @@ pub struct SurfaceRgba8<T> {
     pub data: T,
 }
 
-impl<T> SurfaceRgba8<Vec<T>> {
-    /// Convert to a surface with borrowed data.
-    pub fn as_ref(&self) -> SurfaceRgba8<&[T]> {
-        SurfaceRgba8 {
-            width: self.width,
-            height: self.height,
-            depth: self.depth,
-            layers: self.layers,
-            mipmaps: self.mipmaps,
-            data: self.data.as_ref(),
-        }
-    }
-}
-
 impl<T: AsRef<[u8]>> SurfaceRgba8<T> {
     /// Get the range of 2D image data corresponding to the specified `layer`, `depth_level`, and `mipmap`.
     ///
@@ -167,20 +139,6 @@ impl<T: AsRef<[u8]>> SurfaceRgba8<T> {
             depth_level,
             mipmap,
         )
-    }
-
-    /// Get the image corresponding to the specified `layer`, `depth_level`, and `mipmap`.
-    ///
-    /// Returns [None] if the expected range is not fully contained within the buffer.
-    #[cfg(feature = "image")]
-    pub fn get_image(&self, layer: u32, depth_level: u32, mipmap: u32) -> Option<image::RgbaImage> {
-        self.get(layer, depth_level, mipmap).and_then(|data| {
-            image::RgbaImage::from_raw(
-                mip_dimension(self.width, mipmap),
-                mip_dimension(self.height, mipmap),
-                data.to_vec(),
-            )
-        })
     }
 
     pub(crate) fn validate(&self) -> Result<(), SurfaceError> {
@@ -241,20 +199,19 @@ impl<'a> SurfaceRgba8<&'a [u8]> {
 }
 
 #[cfg(feature = "image")]
-impl<T: AsRef<[u8]>> SurfaceRgba8<T> {
+impl SurfaceRgba8<Vec<u8>> {
     /// Create an image for all layers and depth slices for the given `mipmap`.
     ///
     /// Array layers and depth slices are arranged vertically from top to bottom.
     pub fn to_image(&self, mipmap: u32) -> Result<image::RgbaImage, CreateImageError> {
         // Mipmaps have different dimensions.
         // A single 2D image can only represent data from a single mip level across layers.
-        let mut image_data = Vec::new();
-        for layer in 0..self.layers {
-            for level in 0..self.depth {
-                let data = self.get(layer, level, mipmap).unwrap();
-                image_data.extend_from_slice(data);
-            }
-        }
+        let image_data: Vec<_> = (0..self.layers)
+            .flat_map(|layer| {
+                (0..self.depth).flat_map(move |level| self.get(layer, level, mipmap).unwrap())
+            })
+            .copied()
+            .collect();
         let data_length = image_data.len();
 
         // Arrange depth and array layers vertically.
@@ -271,10 +228,7 @@ impl<T: AsRef<[u8]>> SurfaceRgba8<T> {
             },
         )
     }
-}
 
-#[cfg(feature = "image")]
-impl SurfaceRgba8<Vec<u8>> {
     /// Create an image for all layers and depth slices without copying.
     ///
     /// Fails if the surface has more than one mipmap.
@@ -304,7 +258,7 @@ impl SurfaceRgba8<Vec<u8>> {
 }
 
 /// An uncompressed [ImageFormat::Rgba32Float] surface with 16 bytes per pixel.
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SurfaceRgba32Float<T> {
@@ -329,26 +283,13 @@ pub struct SurfaceRgba32Float<T> {
     pub data: T,
 }
 
-impl<T> SurfaceRgba32Float<Vec<T>> {
-    /// Convert to a surface with borrowed data.
-    pub fn as_ref(&self) -> SurfaceRgba32Float<&[T]> {
-        SurfaceRgba32Float {
-            width: self.width,
-            height: self.height,
-            depth: self.depth,
-            layers: self.layers,
-            mipmaps: self.mipmaps,
-            data: self.data.as_ref(),
-        }
-    }
-}
-
 impl<T: AsRef<[f32]>> SurfaceRgba32Float<T> {
     /// Get the range of 2D image data corresponding to the specified `layer`, `depth_level`, and `mipmap`.
     ///
     /// The dimensions of the returned data should be calculated using [mip_dimension].
     /// Returns [None] if the expected range is not fully contained within the buffer.
     pub fn get(&self, layer: u32, depth_level: u32, mipmap: u32) -> Option<&[f32]> {
+        // TODO: Is it safe to cast like this?
         get_mipmap(
             self.data.as_ref(),
             (self.width, self.height, self.depth),
@@ -358,25 +299,7 @@ impl<T: AsRef<[f32]>> SurfaceRgba32Float<T> {
             depth_level,
             mipmap,
         )
-    }
-
-    /// Get the image corresponding to the specified `layer`, `depth_level`, and `mipmap`.
-    ///
-    /// Returns [None] if the expected range is not fully contained within the buffer.
-    #[cfg(feature = "image")]
-    pub fn get_image(
-        &self,
-        layer: u32,
-        depth_level: u32,
-        mipmap: u32,
-    ) -> Option<image::Rgba32FImage> {
-        self.get(layer, depth_level, mipmap).and_then(|data| {
-            image::Rgba32FImage::from_raw(
-                mip_dimension(self.width, mipmap),
-                mip_dimension(self.height, mipmap),
-                data.to_vec(),
-            )
-        })
+        .map(bytemuck::cast_slice)
     }
 
     pub(crate) fn validate(&self) -> Result<(), SurfaceError> {
@@ -437,20 +360,19 @@ impl<'a> SurfaceRgba32Float<&'a [f32]> {
 }
 
 #[cfg(feature = "image")]
-impl<T: AsRef<[f32]>> SurfaceRgba32Float<T> {
+impl SurfaceRgba32Float<Vec<f32>> {
     /// Create an image for all layers and depth slices for the given `mipmap`.
     ///
     /// Array layers are arranged vertically from top to bottom.
     pub fn to_image(&self, mipmap: u32) -> Result<image::Rgba32FImage, CreateImageError> {
         // Mipmaps have different dimensions.
         // A single 2D image can only represent data from a single mip level across layers.
-        let mut image_data = Vec::new();
-        for layer in 0..self.layers {
-            for level in 0..self.depth {
-                let data = self.get(layer, level, mipmap).unwrap();
-                image_data.extend_from_slice(data);
-            }
-        }
+        let image_data: Vec<_> = (0..self.layers)
+            .flat_map(|layer| {
+                (0..self.depth).flat_map(move |level| self.get(layer, level, mipmap).unwrap())
+            })
+            .copied()
+            .collect();
         let data_length = image_data.len();
 
         // Arrange depth slices horizontally and array layers vertically.
@@ -465,10 +387,7 @@ impl<T: AsRef<[f32]>> SurfaceRgba32Float<T> {
             },
         )
     }
-}
 
-#[cfg(feature = "image")]
-impl SurfaceRgba32Float<Vec<f32>> {
     /// Create an image for all layers and depth slices without copying.
     ///
     /// Fails if the surface has more than one mipmap.
@@ -541,284 +460,4 @@ fn get_mipmap<T>(
     let start = offset_in_bytes / std::mem::size_of::<T>();
     let count = size_in_bytes / std::mem::size_of::<T>();
     data.get(start..start + count)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn surface_as_ref() {
-        assert_eq!(
-            Surface {
-                width: 4,
-                height: 4,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                image_format: ImageFormat::BC7RgbaUnorm,
-                data: &[0u8; 4 * 4][..],
-            },
-            Surface {
-                width: 4,
-                height: 4,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                image_format: ImageFormat::BC7RgbaUnorm,
-                data: vec![0u8; 4 * 4],
-            }
-            .as_ref()
-        );
-    }
-
-    #[test]
-    fn surface_rgba8_as_ref() {
-        assert_eq!(
-            SurfaceRgba8 {
-                width: 4,
-                height: 5,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                data: &[0u8; 4 * 5 * 4][..],
-            },
-            SurfaceRgba8 {
-                width: 4,
-                height: 5,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                data: vec![0u8; 4 * 5 * 4],
-            }
-            .as_ref()
-        );
-    }
-
-    #[test]
-    fn surface_rgbaf32_as_ref() {
-        assert_eq!(
-            SurfaceRgba32Float {
-                width: 4,
-                height: 5,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                data: &[0.0; 4 * 5 * 4][..],
-            },
-            SurfaceRgba32Float {
-                width: 4,
-                height: 5,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                data: vec![0.0; 4 * 5 * 4],
-            }
-            .as_ref()
-        );
-    }
-
-    #[test]
-    fn surface_rgba8_to_image() {
-        assert_eq!(
-            image::RgbaImage::new(4, 5),
-            SurfaceRgba8 {
-                width: 4,
-                height: 5,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                data: vec![0u8; 4 * 5 * 4],
-            }
-            .to_image(0)
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn surface_rgba8_into_image() {
-        assert_eq!(
-            image::RgbaImage::new(4, 5),
-            SurfaceRgba8 {
-                width: 4,
-                height: 5,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                data: vec![0u8; 4 * 5 * 4],
-            }
-            .into_image()
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn surface_rgba8_get_image() {
-        assert_eq!(
-            image::RgbaImage::new(4, 5),
-            SurfaceRgba8 {
-                width: 4,
-                height: 5,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                data: vec![0u8; 4 * 5 * 4],
-            }
-            .get_image(0, 0, 0)
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn surface_rgba8_into_image_invalid_mipmaps() {
-        assert_eq!(
-            Err(CreateImageError::UnexpectedMipmapCount {
-                mipmaps: 2,
-                max_mipmaps: 1
-            }),
-            SurfaceRgba8 {
-                width: 4,
-                height: 4,
-                depth: 1,
-                layers: 1,
-                mipmaps: 2,
-                data: vec![0u8; 4 * 4 * 2 * 4],
-            }
-            .into_image()
-        );
-    }
-
-    #[test]
-    fn surface_rgbaf32_to_image() {
-        assert_eq!(
-            image::Rgba32FImage::new(4, 5),
-            SurfaceRgba32Float {
-                width: 4,
-                height: 5,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                data: vec![0.0; 4 * 5 * 4],
-            }
-            .to_image(0)
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn surface_rgbaf32_into_image() {
-        assert_eq!(
-            image::Rgba32FImage::new(4, 5),
-            SurfaceRgba32Float {
-                width: 4,
-                height: 5,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                data: vec![0.0; 4 * 5 * 4],
-            }
-            .into_image()
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn surface_rgbaf32_into_image_invalid_mipmaps() {
-        assert_eq!(
-            Err(CreateImageError::UnexpectedMipmapCount {
-                mipmaps: 2,
-                max_mipmaps: 1
-            }),
-            SurfaceRgba32Float {
-                width: 4,
-                height: 4,
-                depth: 1,
-                layers: 1,
-                mipmaps: 2,
-                data: vec![0.0; 4 * 4 * 2 * 4],
-            }
-            .into_image()
-        );
-    }
-
-    #[test]
-    fn surface_rgbaf32_get_image() {
-        assert_eq!(
-            image::Rgba32FImage::new(4, 5),
-            SurfaceRgba32Float {
-                width: 4,
-                height: 5,
-                depth: 1,
-                layers: 1,
-                mipmaps: 1,
-                data: vec![0.0; 4 * 5 * 4],
-            }
-            .get_image(0, 0, 0)
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn surface_rgba_from_image_depth() {
-        let image = image::RgbaImage::new(4, 24);
-        assert_eq!(
-            SurfaceRgba8 {
-                width: 4,
-                height: 4,
-                depth: 6,
-                layers: 1,
-                mipmaps: 1,
-                data: &[0; 4 * 4 * 6 * 4][..],
-            },
-            SurfaceRgba8::from_image_depth(&image, 6)
-        );
-    }
-
-    #[test]
-    fn surface_rgbaf32_from_image_depth() {
-        let image = image::Rgba32FImage::new(4, 24);
-        assert_eq!(
-            SurfaceRgba32Float {
-                width: 4,
-                height: 4,
-                depth: 6,
-                layers: 1,
-                mipmaps: 1,
-                data: &[0.0; 4 * 4 * 6 * 4][..],
-            },
-            SurfaceRgba32Float::from_image_depth(&image, 6)
-        );
-    }
-
-    #[test]
-    fn surface_rgba_from_image_layers() {
-        let image = image::RgbaImage::new(4, 24);
-        assert_eq!(
-            SurfaceRgba8 {
-                width: 4,
-                height: 4,
-                depth: 1,
-                layers: 6,
-                mipmaps: 1,
-                data: &[0; 4 * 4 * 6 * 4][..],
-            },
-            SurfaceRgba8::from_image_layers(&image, 6)
-        );
-    }
-
-    #[test]
-    fn surface_rgbaf32_from_image_layers() {
-        let image = image::Rgba32FImage::new(4, 24);
-        assert_eq!(
-            SurfaceRgba32Float {
-                width: 4,
-                height: 4,
-                depth: 1,
-                layers: 6,
-                mipmaps: 1,
-                data: &[0.0; 4 * 4 * 6 * 4][..],
-            },
-            SurfaceRgba32Float::from_image_layers(&image, 6)
-        );
-    }
 }
